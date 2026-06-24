@@ -1,13 +1,17 @@
 import os
 import json
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from airflow.decorators import dag, task
-# Import path depends on your Airflow version — see the note below:
-from airflow.models.param import Param
-from airflow.operators.python import get_current_context
+from airflow.models.param import Param  # available on Airflow 2.x and 3.x
+
+# get_current_context moved to the Task SDK in Airflow 3.x; fall back for 2.x.
+try:
+    from airflow.sdk import get_current_context  # Airflow 3.x
+except ImportError:  # Airflow 2.x
+    from airflow.operators.python import get_current_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs"
@@ -18,6 +22,50 @@ DATASET_BY_SUBSET = {
     "lite": "princeton-nlp/SWE-bench_Lite",
     "full": "princeton-nlp/SWE-bench",
 }
+
+
+def get_git_sha(project_root: Path) -> str:
+    """Best-effort HEAD commit of the pipeline repo, for provenance."""
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_root,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def build_config(ctx) -> dict:
+    """Freeze the Airflow params + provenance into the run's config record."""
+    params = ctx["params"]
+
+    run_id = params["run_id"] or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+    subset = params["subset"]
+    if subset not in DATASET_BY_SUBSET:
+        raise ValueError(
+            f"Unknown subset {subset!r}; expected one of {sorted(DATASET_BY_SUBSET)}"
+        )
+
+    return {
+        "run_id": run_id,
+        "airflow_run_id": ctx["run_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "split": params["split"],
+        "subset": subset,
+        "dataset_name": DATASET_BY_SUBSET[subset],
+        "model": params["model"],
+        "task_slice": params["task_slice"],
+        "workers": params["workers"],
+        "cost_limit": params["cost_limit"],
+        "git_sha": get_git_sha(PROJECT_ROOT),
+    }
+
 
 @dag(
     dag_id="evaluate_agent",
@@ -39,10 +87,14 @@ def evaluate_agent():
     @task
     def prepare_run() -> str:
         ctx = get_current_context()
-        params = ctx["params"]
-        # TODO 1.2: build config dict, create runs/<run-id>/, write config.json,
-        #           return the run_dir path as a string
-        ...
+        config = build_config(ctx)
+
+        run_dir = RUNS_DIR / config["run_id"]
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+        print(f"Prepared run dir: {run_dir}")
+        return str(run_dir)
 
     @task
     def run_agent(run_dir: str) -> str:
@@ -63,5 +115,6 @@ def evaluate_agent():
     preds = run_agent(rd)
     ev = run_eval(rd, preds)
     summarize_and_log(rd, ev)
+
 
 evaluate_agent()
