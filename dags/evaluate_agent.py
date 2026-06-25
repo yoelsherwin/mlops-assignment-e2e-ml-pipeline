@@ -15,6 +15,7 @@ except ImportError:  # Airflow 2.x
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs"
+CONFIG_YAML = PROJECT_ROOT / "config" / "swebench.yaml"  # vendored mini-swe-agent config (pinned in-repo)
 
 # subset -> SWE-bench dataset name that the eval harness expects
 DATASET_BY_SUBSET = {
@@ -98,18 +99,92 @@ def evaluate_agent():
 
     @task
     def run_agent(run_dir: str) -> str:
-        # TODO 1.3: run mini-extra swebench into <run_dir>/run-agent, return preds.json path
-        ...
+        run_dir = Path(run_dir)
+        config = json.loads((run_dir / "config.json").read_text())   # frozen config = source of truth
+
+        out_dir = run_dir / "run-agent"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "uv", "run", "mini-extra", "swebench",
+            "--subset", config["subset"],
+            "--split", config["split"],
+            "--model", config["model"],
+            "--slice", config["task_slice"],
+            "--config", str(CONFIG_YAML),       # vendored copy; -c replaces the packaged default
+            "--workers", str(config["workers"]),
+            "-o", str(out_dir),
+        ]
+        # cost_limit has no batch CLI flag; it's a merged config override.
+        # 0 -> keep the config's built-in limit; >0 -> override it for this run.
+        if config["cost_limit"] and float(config["cost_limit"]) > 0:
+            cmd += ["--config", f"agent.cost_limit={config['cost_limit']}"]
+
+        env = {**os.environ, "MSWEA_COST_TRACKING": "ignore_errors"}
+        subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)   # red on failure
+
+        preds_path = out_dir / "preds.json"
+        if not preds_path.exists():
+            raise FileNotFoundError(f"agent did not produce {preds_path}")
+        return str(preds_path)
 
     @task
     def run_eval(run_dir: str, preds_path: str) -> str:
-        # TODO 1.4: run swebench eval into <run_dir>/run-eval, return the eval dir
-        ...
+        run_dir = Path(run_dir)
+        config = json.loads((run_dir / "config.json").read_text())
+
+        eval_dir = run_dir / "run-eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "uv", "run", "python", "-m", "swebench.harness.run_evaluation",
+            "--dataset_name", config["dataset_name"],
+            "--predictions_path", str(preds_path),
+            "--max_workers", str(config["workers"]),
+            "--run_id", config["run_id"],
+        ]
+        # SWE-bench writes logs/ and the <model>.<run_id>.json summary into its CWD,
+        # so run it *inside* run-eval/ to keep every eval artifact in one place.
+        subprocess.run(cmd, cwd=eval_dir, check=True)
+
+        return str(eval_dir)
 
     @task
     def summarize_and_log(run_dir: str, eval_dir: str) -> None:
-        # TODO 1.5: parse the summary report -> metrics.json
-        ...
+        run_dir = Path(run_dir)
+        eval_dir = Path(eval_dir)
+        config = json.loads((run_dir / "config.json").read_text())
+        run_id = config["run_id"]
+
+        # SWE-bench writes the summary as <model>.<run_id>.json at the top of eval_dir.
+        reports = sorted(eval_dir.glob(f"*.{run_id}.json"))
+        if not reports:
+            raise FileNotFoundError(
+                f"No SWE-bench summary report (*.{run_id}.json) in {eval_dir}. "
+                f"Found: {[p.name for p in eval_dir.iterdir()]}"
+            )
+        report = json.loads(reports[0].read_text())
+
+        submitted = report.get("submitted_instances", 0)
+        resolved = report.get("resolved_instances", 0)
+        metrics = {
+            "run_id": run_id,
+            "model": config["model"],
+            "dataset_name": config["dataset_name"],
+            "total_instances": report.get("total_instances", 0),
+            "submitted_instances": submitted,
+            "completed_instances": report.get("completed_instances", 0),
+            "resolved_instances": resolved,
+            "unresolved_instances": report.get("unresolved_instances", 0),
+            "empty_patch_instances": report.get("empty_patch_instances", 0),
+            "error_instances": report.get("error_instances", 0),
+            "resolve_rate": (resolved / submitted) if submitted else 0.0,
+        }
+
+        (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        print(f"Metrics: {metrics}")
+
+        # TODO Phase 2: log params + metrics + artifact refs to MLflow here.
 
     rd = prepare_run()
     preds = run_agent(rd)
