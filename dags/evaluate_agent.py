@@ -16,6 +16,7 @@ except ImportError:  # Airflow 2.x
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs"
 CONFIG_YAML = PROJECT_ROOT / "config" / "swebench.yaml"  # vendored mini-swe-agent config (pinned in-repo)
+LOG_MLFLOW_SCRIPT = PROJECT_ROOT / "pipeline" / "log_mlflow.py"  # runs in the project venv via `uv run`
 
 # subset -> SWE-bench dataset name that the eval harness expects
 DATASET_BY_SUBSET = {
@@ -184,7 +185,12 @@ def evaluate_agent():
         (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         print(f"Metrics: {metrics}")
 
-        # TODO Phase 2: log params + metrics + artifact refs to MLflow here.
+        # Log to MLflow via the project venv (mlflow isn't in the Airflow tool env).
+        subprocess.run(
+            ["uv", "run", "python", str(LOG_MLFLOW_SCRIPT), "--run-dir", str(run_dir)],
+            cwd=PROJECT_ROOT,
+            check=True,
+        )
 
     rd = prepare_run()
     preds = run_agent(rd)

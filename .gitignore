@@ -9,5 +9,10 @@ __pycache__
 /logs/
 /runs/
 
+# MLflow local server state
+mlflow.db
+/mlartifacts/
+/mlruns/
+
 mini-swe-agent/
 SWE-bench/
