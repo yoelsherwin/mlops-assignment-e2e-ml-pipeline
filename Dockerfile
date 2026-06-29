@@ -13,6 +13,7 @@ WORKDIR /mlops-assignment
 
 COPY pyproject.toml .
 COPY uv.lock .
+COPY .python-version .
 
 RUN uv sync --locked
 
