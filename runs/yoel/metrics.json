@@ -1,0 +1,13 @@
+{
+  "run_id": "yoel",
+  "model": "nebius/moonshotai/Kimi-K2.6",
+  "dataset_name": "princeton-nlp/SWE-bench_Verified",
+  "total_instances": 500,
+  "submitted_instances": 1,
+  "completed_instances": 1,
+  "resolved_instances": 1,
+  "unresolved_instances": 0,
+  "empty_patch_instances": 0,
+  "error_instances": 0,
+  "resolve_rate": 1.0
+}

@@ -1,0 +1,54 @@
+{
+  "run_id": "yoel_1",
+  "created_at": "2026-06-29T19:28:39.039638+00:00",
+  "finalized_at": "2026-06-29T19:33:05.475805+00:00",
+  "git_sha": "884e7022c937fb9498e128e40168af727f32b380",
+  "config": {
+    "split": "test",
+    "subset": "verified",
+    "dataset_name": "princeton-nlp/SWE-bench_Verified",
+    "model": "nebius/moonshotai/Kimi-K2.6",
+    "task_slice": "0:1",
+    "workers": 1,
+    "cost_limit": 0
+  },
+  "metrics": {
+    "run_id": "yoel_1",
+    "model": "nebius/moonshotai/Kimi-K2.6",
+    "dataset_name": "princeton-nlp/SWE-bench_Verified",
+    "total_instances": 500,
+    "submitted_instances": 1,
+    "completed_instances": 1,
+    "resolved_instances": 1,
+    "unresolved_instances": 0,
+    "empty_patch_instances": 0,
+    "error_instances": 0,
+    "resolve_rate": 1.0
+  },
+  "artifacts": {
+    "config": "config.json",
+    "metrics": "metrics.json",
+    "predictions": "run-agent/preds.json",
+    "trajectories": [
+      "run-agent/astropy__astropy-12907/astropy__astropy-12907.traj.json"
+    ],
+    "eval_report": "run-eval/reports/nebius__moonshotai__Kimi-K2.6.yoel_1.json",
+    "eval_logs": "run-eval/logs"
+  },
+  "artifact_location": {
+    "local": "runs/yoel_1",
+    "remote": null
+  },
+  "mlflow": {
+    "tracking_uri": "http://localhost:5000",
+    "experiment": "swebench-eval",
+    "experiment_id": "1",
+    "mlflow_run_id": "817a2ad7ab7b4b4baca624d8e80b3b89",
+    "run_name": "yoel_1",
+    "run_url": "http://localhost:5000/#/experiments/1/runs/817a2ad7ab7b4b4baca624d8e80b3b89"
+  },
+  "inventory": {
+    "num_predictions": 1,
+    "num_trajectories": 1
+  }
+}

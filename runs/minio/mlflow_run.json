@@ -1,0 +1,8 @@
+{
+  "tracking_uri": "http://mlflow:5000",
+  "experiment": "swebench-eval",
+  "experiment_id": "1",
+  "mlflow_run_id": "379fc90ef3634271b9e260685590ac49",
+  "run_name": "minio",
+  "run_url": "http://mlflow:5000/#/experiments/1/runs/379fc90ef3634271b9e260685590ac49"
+}

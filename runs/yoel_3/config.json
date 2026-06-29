@@ -1,0 +1,13 @@
+{
+  "run_id": "yoel_3",
+  "airflow_run_id": "manual__2026-06-29T20:30:36.815814+00:00",
+  "created_at": "2026-06-29T20:30:39.309406+00:00",
+  "split": "test",
+  "subset": "verified",
+  "dataset_name": "princeton-nlp/SWE-bench_Verified",
+  "model": "nebius/moonshotai/Kimi-K2.6",
+  "task_slice": "0:1",
+  "workers": 1,
+  "cost_limit": 0,
+  "git_sha": "9354e8d5d46ed601b9b282aaaed5f71349612ac7"
+}

@@ -1,0 +1,13 @@
+{
+  "run_id": "minio",
+  "airflow_run_id": "manual__2026-06-29T21:38:56+00:00",
+  "created_at": "2026-06-29T21:39:05.375181+00:00",
+  "split": "test",
+  "subset": "verified",
+  "dataset_name": "princeton-nlp/SWE-bench_Verified",
+  "model": "nebius/moonshotai/Kimi-K2.6",
+  "task_slice": "0:1",
+  "workers": 1,
+  "cost_limit": 0,
+  "git_sha": "5e279e85f2a749c05672d2ccffd75ef92f2881ba"
+}

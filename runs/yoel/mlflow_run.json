@@ -1,0 +1,8 @@
+{
+  "tracking_uri": "http://mlflow:5000",
+  "experiment": "swebench-eval",
+  "experiment_id": "1",
+  "mlflow_run_id": "f7c8b64778e941ad89cf47dbea65b8b6",
+  "run_name": "yoel",
+  "run_url": "http://mlflow:5000/#/experiments/1/runs/f7c8b64778e941ad89cf47dbea65b8b6"
+}
