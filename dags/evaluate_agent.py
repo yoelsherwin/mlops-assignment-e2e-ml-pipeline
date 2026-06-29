@@ -69,6 +69,67 @@ def build_config(ctx) -> dict:
     }
 
 
+def build_manifest(run_dir: Path) -> dict:
+    """Index a finished run: metadata + relative pointers to every key artifact,
+    so the folder is self-describing and portable (move/zip/upload and links hold).
+    """
+    config = json.loads((run_dir / "config.json").read_text())
+    run_id = config["run_id"]
+
+    metrics_path = run_dir / "metrics.json"
+    metrics = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
+
+    run_agent = run_dir / "run-agent"
+    run_eval = run_dir / "run-eval"
+    preds = run_agent / "preds.json"
+    trajectories = sorted(run_agent.rglob("*.traj.json"))
+    eval_reports = sorted(run_eval.rglob(f"*.{run_id}.json"))
+    eval_report = eval_reports[0] if eval_reports else None
+    eval_logs = run_eval / "logs"
+
+    def rel(p):
+        return p.relative_to(run_dir).as_posix() if p and p.exists() else None
+
+    mlflow_ref_path = run_dir / "mlflow_run.json"
+    if mlflow_ref_path.exists():
+        mlflow_ref = json.loads(mlflow_ref_path.read_text())
+    else:
+        mlflow_ref = {
+            "tracking_uri": os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"),
+            "experiment": os.environ.get("MLFLOW_EXPERIMENT_NAME", "swebench-eval"),
+            "run_name": run_id,
+        }
+
+    return {
+        "run_id": run_id,
+        "created_at": config.get("created_at"),
+        "finalized_at": datetime.now(timezone.utc).isoformat(),
+        "git_sha": config.get("git_sha"),
+        "config": {
+            k: config.get(k)
+            for k in ["split", "subset", "dataset_name", "model", "task_slice", "workers", "cost_limit"]
+        },
+        "metrics": metrics,
+        "artifacts": {
+            "config": "config.json",
+            "metrics": rel(metrics_path),
+            "predictions": rel(preds),
+            "trajectories": [t.relative_to(run_dir).as_posix() for t in trajectories],
+            "eval_report": rel(eval_report),
+            "eval_logs": rel(eval_logs),
+        },
+        "artifact_location": {
+            "local": f"runs/{run_id}",
+            "remote": None,  # set by the Phase 6 S3 upload
+        },
+        "mlflow": mlflow_ref,
+        "inventory": {
+            "num_predictions": len(json.loads(preds.read_text())) if preds.exists() else 0,
+            "num_trajectories": len(trajectories),
+        },
+    }
+
+
 @dag(
     dag_id="evaluate_agent",
     start_date=datetime(2024, 1, 1),
@@ -148,20 +209,28 @@ def evaluate_agent():
         # so run it *inside* run-eval/ to keep every eval artifact in one place.
         subprocess.run(cmd, cwd=eval_dir, check=True)
 
+        # Tidy the summary report into run-eval/reports/ to match the target tree
+        # (logs/ already lands under run-eval/logs/run_evaluation/...).
+        reports_dir = eval_dir / "reports"
+        reports_dir.mkdir(exist_ok=True)
+        for report in eval_dir.glob(f"*.{config['run_id']}.json"):
+            report.rename(reports_dir / report.name)
+
         return str(eval_dir)
 
     @task
-    def summarize_and_log(run_dir: str, eval_dir: str) -> None:
+    def summarize_and_log(run_dir: str, eval_dir: str) -> str:
         run_dir = Path(run_dir)
         eval_dir = Path(eval_dir)
         config = json.loads((run_dir / "config.json").read_text())
         run_id = config["run_id"]
 
-        # SWE-bench writes the summary as <model>.<run_id>.json at the top of eval_dir.
-        reports = sorted(eval_dir.glob(f"*.{run_id}.json"))
+        # The summary report is <model>.<run_id>.json; rglob finds it wherever it
+        # ended up (run_eval tidies it into reports/).
+        reports = sorted(eval_dir.rglob(f"*.{run_id}.json"))
         if not reports:
             raise FileNotFoundError(
-                f"No SWE-bench summary report (*.{run_id}.json) in {eval_dir}. "
+                f"No SWE-bench summary report (*.{run_id}.json) under {eval_dir}. "
                 f"Found: {[p.name for p in eval_dir.iterdir()]}"
             )
         report = json.loads(reports[0].read_text())
@@ -192,10 +261,21 @@ def evaluate_agent():
             check=True,
         )
 
+        return str(run_dir)
+
+    @task
+    def finalize_run(run_dir: str) -> str:
+        run_dir = Path(run_dir)
+        manifest = build_manifest(run_dir)
+        (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        print(f"Wrote manifest: {run_dir / 'manifest.json'}")
+        return str(run_dir)
+
     rd = prepare_run()
     preds = run_agent(rd)
     ev = run_eval(rd, preds)
-    summarize_and_log(rd, ev)
+    summarized = summarize_and_log(rd, ev)
+    finalize_run(summarized)
 
 
 evaluate_agent()

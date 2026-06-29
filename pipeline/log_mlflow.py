@@ -50,15 +50,15 @@ def main() -> None:
     metrics = json.loads((run_dir / "metrics.json").read_text())
     run_id = config["run_id"]
 
-    # The SWE-bench summary report lives at the top of run-eval/.
+    # The SWE-bench summary report lives under run-eval/ (top level or reports/).
     eval_dir = run_dir / "run-eval"
-    reports = sorted(eval_dir.glob(f"*.{run_id}.json"))
+    reports = sorted(eval_dir.rglob(f"*.{run_id}.json"))
     report_path = reports[0] if reports else None
 
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     mlflow.set_experiment(os.environ.get("MLFLOW_EXPERIMENT_NAME", "swebench-eval"))
 
-    with mlflow.start_run(run_name=run_id):
+    with mlflow.start_run(run_name=run_id) as run:
         mlflow.log_params({k: config.get(k) for k in PARAM_KEYS})
         mlflow.log_metrics({k: metrics[k] for k in METRIC_KEYS if k in metrics})
 
@@ -70,7 +70,20 @@ def main() -> None:
             if f and Path(f).exists():
                 mlflow.log_artifact(str(f))
 
-    print(f"Logged run '{run_id}' to {mlflow.get_tracking_uri()}")
+        info = run.info
+
+    # Write the MLflow run reference back into the folder so manifest.json can link to it.
+    tracking_uri = mlflow.get_tracking_uri()
+    (run_dir / "mlflow_run.json").write_text(json.dumps({
+        "tracking_uri": tracking_uri,
+        "experiment": os.environ.get("MLFLOW_EXPERIMENT_NAME", "swebench-eval"),
+        "experiment_id": info.experiment_id,
+        "mlflow_run_id": info.run_id,
+        "run_name": run_id,
+        "run_url": f"{tracking_uri.rstrip('/')}/#/experiments/{info.experiment_id}/runs/{info.run_id}",
+    }, indent=2))
+
+    print(f"Logged run '{run_id}' to {tracking_uri}")
 
 
 if __name__ == "__main__":
