@@ -26,11 +26,22 @@ services:
 
   mlflow:
     image: mlops-pipeline:latest          # already ships mlflow in its venv (built in Phase 4)
-    command: >
-      mlflow server
-      --backend-store-uri sqlite:////mlflow/mlflow.db
-      --artifacts-destination /mlflow/artifacts
-      --host 0.0.0.0 --port 5000
+    # list form = exec form (no shell), so "*" is passed literally, not glob-expanded.
+    # --allowed-hosts "*" disables MLflow 3.x's Host-header check so the Airflow
+    # container can reach it as http://mlflow:5000 (fine for a dev VM behind SSH).
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --allowed-hosts
+      - "*"
     volumes:
       - mlflow-data:/mlflow
     ports:
