@@ -202,7 +202,8 @@ def evaluate_agent():
     run_eval = docker_step("run_eval", "run_eval.py")
 
     @task
-    def summarize_and_log(run_id: str) -> str:
+    def summarize_and_log(rid: str) -> str:
+        run_id = rid   # param can't be named 'run_id' — it's a reserved TaskFlow context key
         run_dir = RUNS_DIR / run_id
         eval_dir = run_dir / "run-eval"
         config = json.loads((run_dir / "config.json").read_text())
@@ -246,7 +247,8 @@ def evaluate_agent():
         return run_id
 
     @task
-    def finalize_run(run_id: str) -> str:
+    def finalize_run(rid: str) -> str:
+        run_id = rid   # param can't be named 'run_id' — it's a reserved TaskFlow context key
         run_dir = RUNS_DIR / run_id
         manifest = build_manifest(run_dir)
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
