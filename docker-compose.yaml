@@ -1,0 +1,79 @@
+# Containerized deployment of the evaluate_agent pipeline: Postgres + Airflow + MLflow.
+#
+# Airflow runs `airflow standalone` in one container (it orchestrates the 3.x components
+# internally) with a Postgres metadata DB and the LocalExecutor. The heavy agent/eval
+# steps still run as *sibling* containers via DockerOperator (Docker-out-of-Docker),
+# using the mlops-pipeline:latest image built from ./Dockerfile.
+#
+# Required .env keys: NEBIUS_API_KEY, HOST_PROJECT_DIR, AIRFLOW_UID, DOCKER_GID.
+# Prereq: `docker build -t mlops-pipeline:latest .` (the agent/eval + MLflow image).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mlflow:
+    image: mlops-pipeline:latest          # already ships mlflow in its venv (built in Phase 4)
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --host 0.0.0.0 --port 5000
+    volumes:
+      - mlflow-data:/mlflow
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: mlops-airflow:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Run as the host user so files written to runs/ are owned correctly,
+    # plus the host docker group so the mounted socket is usable.
+    user: "${AIRFLOW_UID:?set AIRFLOW_UID in .env (id -u)}:0"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in .env (getent group docker | cut -d: -f3)}"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: swebench-eval
+      NEBIUS_API_KEY: "${NEBIUS_API_KEY:?set NEBIUS_API_KEY in .env}"
+      # Host repo path so DockerOperator bind-mounts resolve on the host daemon:
+      HOST_PROJECT_DIR: "${HOST_PROJECT_DIR:?set HOST_PROJECT_DIR in .env (absolute repo path)}"
+    volumes:
+      - "${HOST_PROJECT_DIR}:/opt/airflow/project"      # dags, pipeline, config, runs
+      - "${HOST_PROJECT_DIR}/logs:/opt/airflow/logs"
+      - /var/run/docker.sock:/var/run/docker.sock        # Docker-out-of-Docker
+    ports:
+      - "8080:8080"
+    command:
+      - bash
+      - -c
+      - |
+        echo '{"admin": "admin"}' > /opt/airflow/simple_auth_manager_passwords.json.generated
+        exec airflow standalone
+    restart: unless-stopped
+
+volumes:
+  postgres-db:
+  mlflow-data:

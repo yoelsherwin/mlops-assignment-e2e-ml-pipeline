@@ -17,13 +17,17 @@ except ImportError:  # Airflow 2.x
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs"
-LOG_MLFLOW_SCRIPT = PROJECT_ROOT / "pipeline" / "log_mlflow.py"  # runs in the project venv via `uv run`
 
 # Image built from the project Dockerfile; the agent/eval steps run inside it.
 PIPELINE_IMAGE = os.environ.get("PIPELINE_IMAGE", "mlops-pipeline:latest")
-# Paths *inside* the container (Dockerfile WORKDIR is /mlops-assignment).
+# Paths *inside* the agent/eval container (Dockerfile WORKDIR is /mlops-assignment).
 CONTAINER_ROOT = "/mlops-assignment"
 CONTAINER_RUNS = f"{CONTAINER_ROOT}/runs"
+# Host path of runs/ for DockerOperator bind-mounts: in docker-compose Airflow runs in a
+# container, so the mount SOURCE must be the host path (HOST_PROJECT_DIR); in standalone
+# Airflow is on the host, so PROJECT_ROOT already is the host path.
+HOST_PROJECT_DIR = Path(os.environ.get("HOST_PROJECT_DIR", str(PROJECT_ROOT)))
+HOST_RUNS = HOST_PROJECT_DIR / "runs"
 
 # subset -> SWE-bench dataset name that the eval harness expects
 DATASET_BY_SUBSET = {
@@ -137,6 +141,50 @@ def build_manifest(run_dir: Path) -> dict:
     }
 
 
+def log_to_mlflow(run_dir: Path, config: dict, metrics: dict) -> None:
+    """Log params, metrics, and key artifacts to MLflow in-process, and drop an
+    mlflow_run.json in the run dir so manifest.json can link back to the tracked run.
+
+    Uses the mlflow-skinny client present in the Airflow env, reaching
+    MLFLOW_TRACKING_URI (localhost:5000 in standalone, http://mlflow:5000 in compose).
+    """
+    import mlflow  # lazy: only this step needs the client
+
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    experiment = os.environ.get("MLFLOW_EXPERIMENT_NAME", "swebench-eval")
+    mlflow.set_experiment(experiment)
+
+    run_id = config["run_id"]
+    eval_reports = sorted((run_dir / "run-eval").rglob(f"*.{run_id}.json"))
+    eval_report = eval_reports[0] if eval_reports else None
+
+    param_keys = ["run_id", "airflow_run_id", "split", "subset", "dataset_name",
+                  "model", "task_slice", "workers", "cost_limit", "git_sha"]
+    metric_keys = ["total_instances", "submitted_instances", "completed_instances",
+                   "resolved_instances", "unresolved_instances", "empty_patch_instances",
+                   "error_instances", "resolve_rate"]
+
+    with mlflow.start_run(run_name=run_id) as run:
+        mlflow.log_params({k: config.get(k) for k in param_keys})
+        mlflow.log_metrics({k: metrics[k] for k in metric_keys if k in metrics})
+        mlflow.set_tag("artifact_dir", str(run_dir))
+        for f in (run_dir / "config.json", run_dir / "metrics.json", eval_report):
+            if f and Path(f).exists():
+                mlflow.log_artifact(str(f))
+        info = run.info
+
+    tracking_uri = mlflow.get_tracking_uri()
+    (run_dir / "mlflow_run.json").write_text(json.dumps({
+        "tracking_uri": tracking_uri,
+        "experiment": experiment,
+        "experiment_id": info.experiment_id,
+        "mlflow_run_id": info.run_id,
+        "run_name": run_id,
+        "run_url": f"{tracking_uri.rstrip('/')}/#/experiments/{info.experiment_id}/runs/{info.run_id}",
+    }, indent=2))
+    print(f"Logged run '{run_id}' to {tracking_uri}")
+
+
 def docker_step(task_id: str, script: str) -> DockerOperator:
     """A DockerOperator that runs one pipeline step inside the project image.
 
@@ -159,7 +207,7 @@ def docker_step(task_id: str, script: str) -> DockerOperator:
             # DooD: the container's docker CLI talks to the host daemon
             Mount(source="/var/run/docker.sock", target="/var/run/docker.sock", type="bind"),
             # persist run artifacts on the host (source must be a host path)
-            Mount(source=str(RUNS_DIR), target=CONTAINER_RUNS, type="bind"),
+            Mount(source=str(HOST_RUNS), target=CONTAINER_RUNS, type="bind"),
         ],
         environment={
             "NEBIUS_API_KEY": os.environ.get("NEBIUS_API_KEY", ""),
@@ -236,13 +284,8 @@ def evaluate_agent():
         (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         print(f"Metrics: {metrics}")
 
-        # Log to MLflow on the host via the project venv (mlflow isn't in the Airflow env,
-        # and host->localhost:5000 avoids container networking).
-        subprocess.run(
-            ["uv", "run", "python", str(LOG_MLFLOW_SCRIPT), "--run-dir", str(run_dir)],
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
+        # Log to MLflow in-process (mlflow-skinny client in the Airflow env).
+        log_to_mlflow(run_dir, config, metrics)
 
         return run_id
 

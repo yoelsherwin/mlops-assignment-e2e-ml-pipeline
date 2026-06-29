@@ -1,0 +1,9 @@
+# Airflow image for docker-compose: base Airflow + the Docker provider (for DockerOperator)
+# + a lightweight MLflow client (summarize_and_log logs to MLflow in-process).
+# mlflow-skinny is the client-only package — no server/UI/heavy deps, so it coexists
+# cleanly with Airflow's pinned dependencies.
+FROM apache/airflow:3.1.6
+
+RUN pip install --no-cache-dir \
+    apache-airflow-providers-docker \
+    mlflow-skinny
