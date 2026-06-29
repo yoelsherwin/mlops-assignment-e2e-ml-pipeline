@@ -6,6 +6,8 @@ from pathlib import Path
 
 from airflow.decorators import dag, task
 from airflow.models.param import Param  # available on Airflow 2.x and 3.x
+from airflow.providers.docker.operators.docker import DockerOperator
+from docker.types import Mount
 
 # get_current_context moved to the Task SDK in Airflow 3.x; fall back for 2.x.
 try:
@@ -15,8 +17,13 @@ except ImportError:  # Airflow 2.x
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs"
-CONFIG_YAML = PROJECT_ROOT / "config" / "swebench.yaml"  # vendored mini-swe-agent config (pinned in-repo)
 LOG_MLFLOW_SCRIPT = PROJECT_ROOT / "pipeline" / "log_mlflow.py"  # runs in the project venv via `uv run`
+
+# Image built from the project Dockerfile; the agent/eval steps run inside it.
+PIPELINE_IMAGE = os.environ.get("PIPELINE_IMAGE", "mlops-pipeline:latest")
+# Paths *inside* the container (Dockerfile WORKDIR is /mlops-assignment).
+CONTAINER_ROOT = "/mlops-assignment"
+CONTAINER_RUNS = f"{CONTAINER_ROOT}/runs"
 
 # subset -> SWE-bench dataset name that the eval harness expects
 DATASET_BY_SUBSET = {
@@ -130,6 +137,37 @@ def build_manifest(run_dir: Path) -> dict:
     }
 
 
+def docker_step(task_id: str, script: str) -> DockerOperator:
+    """A DockerOperator that runs one pipeline step inside the project image.
+
+    Docker-out-of-Docker: the container drives the *host* daemon via the mounted
+    socket (the agent/eval spin up per-instance SWE-bench containers), and run
+    artifacts land on the host through the bind-mounted runs/ directory. The only
+    templated value is the run_id pulled from prepare_run's XCom.
+    """
+    return DockerOperator(
+        task_id=task_id,
+        image=PIPELINE_IMAGE,
+        command=[
+            "python", f"pipeline/{script}",
+            "--run-dir", CONTAINER_RUNS + "/{{ ti.xcom_pull(task_ids='prepare_run') }}",
+        ],
+        docker_url="unix://var/run/docker.sock",
+        auto_remove="success",   # older docker providers want auto_remove=True
+        mount_tmp_dir=False,
+        mounts=[
+            # DooD: the container's docker CLI talks to the host daemon
+            Mount(source="/var/run/docker.sock", target="/var/run/docker.sock", type="bind"),
+            # persist run artifacts on the host (source must be a host path)
+            Mount(source=str(RUNS_DIR), target=CONTAINER_RUNS, type="bind"),
+        ],
+        environment={
+            "NEBIUS_API_KEY": os.environ.get("NEBIUS_API_KEY", ""),
+            "MSWEA_COST_TRACKING": "ignore_errors",
+        },
+    )
+
+
 @dag(
     dag_id="evaluate_agent",
     start_date=datetime(2024, 1, 1),
@@ -157,81 +195,24 @@ def evaluate_agent():
         (run_dir / "config.json").write_text(json.dumps(config, indent=2))
 
         print(f"Prepared run dir: {run_dir}")
-        return str(run_dir)
+        return config["run_id"]   # run_id flows downstream; containers build their own paths
+
+    # Heavy, environment-sensitive steps run in isolated containers (DockerOperator).
+    run_agent = docker_step("run_agent", "run_agent.py")
+    run_eval = docker_step("run_eval", "run_eval.py")
 
     @task
-    def run_agent(run_dir: str) -> str:
-        run_dir = Path(run_dir)
-        config = json.loads((run_dir / "config.json").read_text())   # frozen config = source of truth
-
-        out_dir = run_dir / "run-agent"
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        cmd = [
-            "uv", "run", "mini-extra", "swebench",
-            "--subset", config["subset"],
-            "--split", config["split"],
-            "--model", config["model"],
-            "--slice", config["task_slice"],
-            "--config", str(CONFIG_YAML),       # vendored copy; -c replaces the packaged default
-            "--workers", str(config["workers"]),
-            "-o", str(out_dir),
-        ]
-        # cost_limit has no batch CLI flag; it's a merged config override.
-        # 0 -> keep the config's built-in limit; >0 -> override it for this run.
-        if config["cost_limit"] and float(config["cost_limit"]) > 0:
-            cmd += ["--config", f"agent.cost_limit={config['cost_limit']}"]
-
-        env = {**os.environ, "MSWEA_COST_TRACKING": "ignore_errors"}
-        subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)   # red on failure
-
-        preds_path = out_dir / "preds.json"
-        if not preds_path.exists():
-            raise FileNotFoundError(f"agent did not produce {preds_path}")
-        return str(preds_path)
-
-    @task
-    def run_eval(run_dir: str, preds_path: str) -> str:
-        run_dir = Path(run_dir)
-        config = json.loads((run_dir / "config.json").read_text())
-
+    def summarize_and_log(run_id: str) -> str:
+        run_dir = RUNS_DIR / run_id
         eval_dir = run_dir / "run-eval"
-        eval_dir.mkdir(parents=True, exist_ok=True)
-
-        cmd = [
-            "uv", "run", "python", "-m", "swebench.harness.run_evaluation",
-            "--dataset_name", config["dataset_name"],
-            "--predictions_path", str(preds_path),
-            "--max_workers", str(config["workers"]),
-            "--run_id", config["run_id"],
-        ]
-        # SWE-bench writes logs/ and the <model>.<run_id>.json summary into its CWD,
-        # so run it *inside* run-eval/ to keep every eval artifact in one place.
-        subprocess.run(cmd, cwd=eval_dir, check=True)
-
-        # Tidy the summary report into run-eval/reports/ to match the target tree
-        # (logs/ already lands under run-eval/logs/run_evaluation/...).
-        reports_dir = eval_dir / "reports"
-        reports_dir.mkdir(exist_ok=True)
-        for report in eval_dir.glob(f"*.{config['run_id']}.json"):
-            report.rename(reports_dir / report.name)
-
-        return str(eval_dir)
-
-    @task
-    def summarize_and_log(run_dir: str, eval_dir: str) -> str:
-        run_dir = Path(run_dir)
-        eval_dir = Path(eval_dir)
         config = json.loads((run_dir / "config.json").read_text())
-        run_id = config["run_id"]
 
-        # The summary report is <model>.<run_id>.json; rglob finds it wherever it
-        # ended up (run_eval tidies it into reports/).
+        # The summary report is <model>.<run_id>.json; rglob finds it wherever it landed.
         reports = sorted(eval_dir.rglob(f"*.{run_id}.json"))
         if not reports:
+            found = [p.name for p in eval_dir.iterdir()] if eval_dir.exists() else "run-eval missing"
             raise FileNotFoundError(
-                f"No SWE-bench summary report (*.{run_id}.json) under {eval_dir}. "
-                f"Found: {[p.name for p in eval_dir.iterdir()]}"
+                f"No SWE-bench summary report (*.{run_id}.json) under {eval_dir}. Found: {found}"
             )
         report = json.loads(reports[0].read_text())
 
@@ -254,28 +235,29 @@ def evaluate_agent():
         (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         print(f"Metrics: {metrics}")
 
-        # Log to MLflow via the project venv (mlflow isn't in the Airflow tool env).
+        # Log to MLflow on the host via the project venv (mlflow isn't in the Airflow env,
+        # and host->localhost:5000 avoids container networking).
         subprocess.run(
             ["uv", "run", "python", str(LOG_MLFLOW_SCRIPT), "--run-dir", str(run_dir)],
             cwd=PROJECT_ROOT,
             check=True,
         )
 
-        return str(run_dir)
+        return run_id
 
     @task
-    def finalize_run(run_dir: str) -> str:
-        run_dir = Path(run_dir)
+    def finalize_run(run_id: str) -> str:
+        run_dir = RUNS_DIR / run_id
         manifest = build_manifest(run_dir)
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         print(f"Wrote manifest: {run_dir / 'manifest.json'}")
-        return str(run_dir)
+        return run_id
 
-    rd = prepare_run()
-    preds = run_agent(rd)
-    ev = run_eval(rd, preds)
-    summarized = summarize_and_log(rd, ev)
-    finalize_run(summarized)
+    run_id = prepare_run()
+    run_id >> run_agent >> run_eval          # prepare -> agent -> eval (file handoff on disk)
+    summary = summarize_and_log(run_id)
+    run_eval >> summary                      # summarize waits for eval to finish
+    finalize_run(summary)
 
 
 evaluate_agent()
