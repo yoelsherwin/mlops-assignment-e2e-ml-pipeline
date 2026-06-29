@@ -6,7 +6,8 @@
 # using the mlops-pipeline:latest image built from ./Dockerfile.
 #
 # Required .env keys: NEBIUS_API_KEY, HOST_PROJECT_DIR, AIRFLOW_UID, DOCKER_GID.
-# Prereq: `docker build -t mlops-pipeline:latest .` (the agent/eval + MLflow image).
+# `docker compose up -d --build` builds BOTH images: mlops-airflow (this stack's Airflow)
+# and mlops-pipeline (the mlflow service + the DockerOperator agent/eval steps).
 
 services:
   postgres:
@@ -25,7 +26,10 @@ services:
     restart: unless-stopped
 
   mlflow:
-    image: mlops-pipeline:latest          # already ships mlflow in its venv (built in Phase 4)
+    build:                                # builds mlops-pipeline:latest so the DockerOperator
+      context: .                          # agent/eval steps can use it too (no manual docker build)
+      dockerfile: Dockerfile
+    image: mlops-pipeline:latest          # ships mlflow in its venv
     # list form = exec form (no shell), so "*" is passed literally, not glob-expanded.
     # --allowed-hosts "*" disables MLflow 3.x's Host-header check so the Airflow
     # container can reach it as http://mlflow:5000 (fine for a dev VM behind SSH).

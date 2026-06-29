@@ -1,7 +1,7 @@
 import os
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from airflow.decorators import dag, task
@@ -28,6 +28,10 @@ CONTAINER_RUNS = f"{CONTAINER_ROOT}/runs"
 # Airflow is on the host, so PROJECT_ROOT already is the host path.
 HOST_PROJECT_DIR = Path(os.environ.get("HOST_PROJECT_DIR", str(PROJECT_ROOT)))
 HOST_RUNS = HOST_PROJECT_DIR / "runs"
+
+# Reliability defaults: retries absorb transient docker/network/API hiccups; the timeout
+# guards the long agent/eval steps against hangs (raise it for large slices).
+STEP_TIMEOUT = timedelta(hours=2)
 
 # subset -> SWE-bench dataset name that the eval harness expects
 DATASET_BY_SUBSET = {
@@ -250,6 +254,7 @@ def docker_step(task_id: str, script: str) -> DockerOperator:
             "NEBIUS_API_KEY": os.environ.get("NEBIUS_API_KEY", ""),
             "MSWEA_COST_TRACKING": "ignore_errors",
         },
+        execution_timeout=STEP_TIMEOUT,
     )
 
 
@@ -258,6 +263,8 @@ def docker_step(task_id: str, script: str) -> DockerOperator:
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
+    # retries/retry_delay apply to every task; heavy steps also set execution_timeout below.
+    default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
     params={
         "split": Param("test", type="string"),
         "subset": Param("verified", type="string", enum=["verified", "lite", "full"]),
@@ -335,7 +342,7 @@ def evaluate_agent():
         print(f"Wrote manifest: {run_dir / 'manifest.json'}")
         return run_id
 
-    @task
+    @task(execution_timeout=timedelta(minutes=15))
     def upload_artifacts(rid: str) -> str:
         run_id = rid
         run_dir = RUNS_DIR / run_id
