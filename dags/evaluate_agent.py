@@ -185,6 +185,43 @@ def log_to_mlflow(run_dir: Path, config: dict, metrics: dict) -> None:
     print(f"Logged run '{run_id}' to {tracking_uri}")
 
 
+def upload_dir_to_s3(local_dir: Path, key_prefix: str) -> str:
+    """Upload every file under local_dir to the configured S3/MinIO bucket under
+    key_prefix/, preserving relative paths. Returns the s3:// URI of the prefix."""
+    import boto3
+
+    bucket = os.environ["S3_BUCKET"]
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=os.environ["S3_ENDPOINT_URL"],
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+    )
+    try:
+        s3.head_bucket(Bucket=bucket)
+    except Exception:
+        s3.create_bucket(Bucket=bucket)
+
+    for path in sorted(local_dir.rglob("*")):
+        if path.is_file():
+            key = f"{key_prefix}/{path.relative_to(local_dir).as_posix()}"
+            s3.upload_file(str(path), bucket, key)
+    return f"s3://{bucket}/{key_prefix}/"
+
+
+def tag_mlflow_remote(run_dir: Path, remote_uri: str) -> None:
+    """Record the remote artifact URI on the run's MLflow run (if it was logged)."""
+    ref = run_dir / "mlflow_run.json"
+    if not ref.exists():
+        return
+    import mlflow
+
+    info = json.loads(ref.read_text())
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    mlflow.tracking.MlflowClient().set_tag(info["mlflow_run_id"], "remote_uri", remote_uri)
+
+
 def docker_step(task_id: str, script: str) -> DockerOperator:
     """A DockerOperator that runs one pipeline step inside the project image.
 
@@ -298,11 +335,34 @@ def evaluate_agent():
         print(f"Wrote manifest: {run_dir / 'manifest.json'}")
         return run_id
 
+    @task
+    def upload_artifacts(rid: str) -> str:
+        run_id = rid
+        run_dir = RUNS_DIR / run_id
+
+        if not (os.environ.get("S3_ENDPOINT_URL") and os.environ.get("S3_BUCKET")):
+            print("Object storage not configured (S3_ENDPOINT_URL / S3_BUCKET unset); skipping upload.")
+            return run_id
+
+        remote_uri = f"s3://{os.environ['S3_BUCKET']}/{run_id}/"
+        # Record the remote URI in manifest.json BEFORE uploading, so the uploaded copy has it.
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifact_location"]["remote"] = remote_uri
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        upload_dir_to_s3(run_dir, run_id)
+        tag_mlflow_remote(run_dir, remote_uri)
+
+        print(f"Uploaded run '{run_id}' -> {remote_uri}")
+        return run_id
+
     run_id = prepare_run()
     run_id >> run_agent >> run_eval          # prepare -> agent -> eval (file handoff on disk)
     summary = summarize_and_log(run_id)
     run_eval >> summary                      # summarize waits for eval to finish
-    finalize_run(summary)
+    finalized = finalize_run(summary)
+    upload_artifacts(finalized)
 
 
 evaluate_agent()

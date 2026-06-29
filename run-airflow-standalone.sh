@@ -11,4 +11,5 @@ echo '{"admin": "admin"}' > $AIRFLOW_HOME/simple_auth_manager_passwords.json.gen
 uv tool run \
     --with apache-airflow-providers-docker \
     --with mlflow-skinny \
+    --with boto3 \
     apache-airflow standalone
